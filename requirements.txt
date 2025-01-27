@@ -1,0 +1,2 @@
+flask
+docpilot @ git+ssh://git@github.com/Silent-Crafter/libdocpilot
