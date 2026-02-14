@@ -1,2 +1,3 @@
 flask
+flask-cors
 docpilot @ git+ssh://git@github.com/Silent-Crafter/libdocpilot
