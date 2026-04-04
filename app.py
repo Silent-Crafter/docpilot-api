@@ -87,6 +87,11 @@ def stream_post():
         }
     )
 
+@app.route('/history/', methods=['POST'])
+def history():
+    uuid = request.json().get('uuid')
+    return jsonify(chatbot.history)
+
 # Disable Caching
 @app.after_request
 def add_header(r):
