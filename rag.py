@@ -1,12 +1,14 @@
+import logging
 import re
 import base64
 import json
 
 from docpilot.dspyclasses import MultiHopRAG, configure_llm
 from docpilot.utils.llama_utils import load_docs, get_vector_store_index
-from docpilot.utils.image_utils import mappings_to_llamaindex_document
-
+from docpilot.utils.logger import setup_logging
 from config import Config
+
+setup_logging(level=logging.DEBUG)
 
 class ChatBot:
     def __init__(self):
@@ -20,6 +22,7 @@ class ChatBot:
         resps = self.__rag.forward(question=prompt, stream=True)
         actual_resp = {}
         final_resp = {}
+        accumulated = ""
         for resp in resps:
             if resp["type"] == "answer_with_images":
                 actual_resp = resp
@@ -44,6 +47,10 @@ class ChatBot:
                 final_resp = resp
                 yield resp
 
+            elif resp["type"] == "streaming_answer":
+                accumulated += resp["content"]
+                yield accumulated
+
             elif resp["type"] == "files":
                 print(f"\n\033[0;31m[+] Using files:\033[0m {resp['content']}\n")
                 yield resp
@@ -53,39 +60,28 @@ class ChatBot:
                 yield resp
 
 
-        # imgs = re.findall(r"<img.*?src=\"(img-[0-9]{20}-\d+\..*?)\".*?/>", final_resp['content'])
-        # imgs = re.findall(r"<img.*?src=\"(.*?)\".*?/>", final_resp['content'])
-        # b64_imgs = []
-        # for img in imgs:
-        #     try:
-        #         ext = img.split(".")[-1]
-        #         file = open('../docpilot/out_images/'+img, 'rb')
-        #         b64_imgs.append({"image": img, "b64": f"data:image/{ext};base64, "+base64.b64encode(file.read()).decode('utf-8')})
-        #         file.close()
-        #     except FileNotFoundError:
-        #         b64_imgs.append({"image": img, "b64": " "})
-        # print(len(final_resp['content']))
-        # for item in b64_imgs:
-        #     img = item['image']
-        #     b64_img = item['b64']
-        #     final_resp['content'] = final_resp['content'].replace(img, b64_img)
-
-        # print(len(final_resp['content']))
-        # return final_resp
+    def add_file(self, file: str):
+        self.__rag.add_new_document(file)
 
     def __get_index(self):
-        images = mappings_to_llamaindex_document(self.mappings, 'out_images')
+        text_docs, image_docs, mapping = ChatBot.__load_docs()
+
+        with open('./labels/new.json', 'w') as f:
+            f.write(json.dumps(mapping))
+
         return [get_vector_store_index(
-                    documents=ChatBot.__load_docs(), 
+                    documents=text_docs,
                     uri=Config.PG_CONNECTION_URI,
                     embeddings_table=Config.embed_table,
-                    embed_model=Config.embed_model
+                    embed_model=Config.embed_model,
+                    reindex=True
                 ),
                 get_vector_store_index(
-                    documents=images,
+                    documents=image_docs,
                     uri=Config.PG_CONNECTION_URI,
                     embeddings_table='data_images',
-                    embed_model=Config.embed_model
+                    embed_model=Config.embed_model,
+                    reindex=True
                 )]
 
     @staticmethod
@@ -93,5 +89,7 @@ class ChatBot:
         return load_docs(
             doc_dir=Config.document_dir,
             uri=Config.PG_CONNECTION_URI,
-            embedding_table=Config.embed_table
+            embedding_table=Config.embed_table,
+            reindex=True
         )
+

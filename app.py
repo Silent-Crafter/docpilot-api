@@ -1,70 +1,136 @@
+import os
 import json
-from flask import Flask, request, jsonify, make_response, Response, stream_with_context
+import logging
+import uuid
+import time
+
+from flask import Flask, request, jsonify, Response, stream_with_context
+from werkzeug.datastructures.file_storage import FileStorage
+from werkzeug.utils import secure_filename
 from rag import ChatBot
 from flask_cors import CORS
 
 app = Flask(__name__)
-chatbot = ChatBot()
+app.config['UPLOAD_FOLDER'] = './data/'
 
 CORS(app, resources={r"/*": {"origins": "*"}})
+
+logger = logging.getLogger(__name__)
+chats: dict[str, ChatBot] = {}
 
 @app.route('/')
 def root():
     return "Api is running"
 
+@app.route('/chat/new', methods=['POST'])
+def new_chat():
+    chatid = str(uuid.uuid4())
+    chats.update({chatid: ChatBot()})
+    timestamp = time.time()
 
-@app.route('/stream')
+    return jsonify({"chatid": chatid, "timestamp": timestamp})
+
+
+@app.route('/stream', methods=['GET', 'POST'])
 def stream():
-    prompt = request.args.get("prompt", "")
+    def event_stream(prompt, chatid, timestamp, file_path: str | None = None):
+        yield {"type": "START", "status": "", "content": "", "chatid": chatid, "timestamp": timestamp}
+        if file_path is not None:
+            data = {"type": "file_upload", "status": "Uploading file", "content": file_path}
+            yield f"data: {json.dumps(data)}\n\n"
+            chats[chatid].add_file(file_path)
 
-    def event_stream():
-        nonlocal prompt
         if not prompt.strip():
-            yield f"data: {json.dumps({'type': 'answer_with_images', 'content': 'try again', 'status': 'done'})}\n\n"
+            yield f"data: {json.dumps({'type': 'answer_with_images', 'content': 'INVALID PROMPT', 'status': 'done'})}\n\n"
 
         else:
-            output = chatbot.generate(prompt)
-            while True:
-                try:
-                    chunk = next(output)
-                    if chunk.get('type') == 'answer_with_images':
-                        __import__('time').sleep(1.5)
-                    yield f"data: {json.dumps(chunk)}\n\n"
-                except StopIteration:
-                    break
+            output = chats['chatid'].generate(prompt)
+            for chunk in output:
+                yield f"data: {json.dumps(chunk)}\n\n"
 
-    return Response( 
-        stream_with_context(event_stream()),
-        mimetype="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no"
-        }
-    )
+    if request.method == 'GET':
+        prompt = request.args.get("prompt", "")
+        chatid = ''
+        timestamp = time.time()
+        if request.args.get('chatid') is None:
+            chatid = str(uuid.uuid4())
+            chats.update({chatid: ChatBot()})
+
+        if chatid not in chats:
+            return jsonify({"type": "error", "content": "invalid chatid"})
+
+        return Response( 
+            stream_with_context(event_stream(prompt, chatid, timestamp)),
+            mimetype="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no"
+            }
+        )
+
+    elif request.method == 'POST':
+        data = request.get_json(silent=True)
+        file: FileStorage | None = None
+        file_path: str | None = None
+        if 'file' in request.files:
+            file = request.files['file']
+
+        if isinstance(file, FileStorage) and file.filename.strip() != '':
+            filename = secure_filename(file.filename)
+            file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+            file.save(file_path)
+
+        if data is None:
+            return jsonify({'error': 'Invalid request.'}), 415
+
+        prompt = data.get('prompt')
+        if not prompt:
+            return jsonify({'error': 'Invalid request.'}), 400
+
+        chatid = ''
+        timestamp = time.time()
+        if data.get('chatid') is not None:
+            chatid = str(uuid.uuid4())
+            chats.update({chatid: ChatBot()})
+
+        if chatid not in chats:
+            return jsonify({"type": "error", "content": "invalid chatid"})
+
+        return Response( 
+            stream_with_context(event_stream(prompt, chatid, file_path, timestamp)),
+            mimetype="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no"
+            }
+        )
 
 
 @app.route('/generate', methods=['POST', 'GET'])
 def generate():
-    data: dict = request.get_json(silent=True)
-    print(data)
-    if not data:
+    data = request.get_json(silent=True)
+    if data is None:
         return jsonify({'error': 'Invalid request.'}), 415
 
     prompt = data.get('prompt')
-    print(prompt)
     if not prompt:
         return jsonify({'error': 'Invalid request.'}), 400
 
-    resp = chatbot.generate(prompt)
-    final_resp = None
-    while True:
-        try:
-            content = next(resp)
-            final_resp = content
-        except StopIteration:
-            break
+    chatid = ''
+    timestamp = time.time()
+    if data.get('chatid') is not None:
+        chatid = str(uuid.uuid4())
+        chats.update({chatid: ChatBot()})
 
-    return jsonify(final_resp)
+    if chatid not in chats:
+        return jsonify({"type": "error", "content": "invalid chatid"})
+
+    resp = chats[chatid].generate(prompt)
+    final_resp = None
+    for content in resp:
+        final_resp = content
+
+    return jsonify({**final_resp, "chatid": chatid, "timestamp": timestamp})
 
 # Disable Caching
 @app.after_request
