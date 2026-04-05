@@ -1,8 +1,9 @@
 import random
 import time
 import json
+import time
+import uuid
 import base64
-
 from flask import Flask, jsonify, request, stream_with_context, Response
 from flask_cors import CORS
 
@@ -11,12 +12,20 @@ from dummyrag import dummyrag
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
-chatbot = dummyrag()
+chatbot = {}
 
 @app.route('/')
 def root():
     return "Api is working"
 
+@app.route('/chat/new', methods=['GET'])
+def new_chat():
+    uid = str(uuid.uuid4())
+    chatbot[uid] = dummyrag()
+    timestamp = int(time.time())
+    print(f"New chat session created with uuid: {uid}")
+    print(f"Current active sessions: {list(chatbot.keys())}")
+    return {"chatid": uid, "timestamp": timestamp}
 
 @app.route('/generate', methods=['POST'])
 def generate():
@@ -27,16 +36,21 @@ def generate():
     if not data.get('prompt', None):
         return jsonify({"type": "error", "content": "invalid request body. prompt not found"})
 
+    if not data.get('chatid') or data['chatid'] not in chatbot:
+        return jsonify({"type": "error", "content": "invalid or missing chatid. call /new_chat first"})
+
     time.sleep(random.randint(2, 5))
 
-    return jsonify(chatbot.generate(data['prompt'], stream=False))
+    return jsonify(chatbot[data['chatid']].generate(data['prompt'], stream=False))
 
 
 @app.route('/stream', methods=['GET'])
 def stream():
     prompt = request.args.get("prompt", None)
-    if not prompt:
-        err = json.dumps({"type": "error", "content": "Please specify a prompt"})
+    session_uuid = request.args.get("chatid", None)
+
+    def sse_error(message):
+        err = json.dumps({"type": "error", "content": message})
         def resp(): 
             yield f"data: {err}\n\n"
 
@@ -49,8 +63,17 @@ def stream():
             }
         )
 
+    if not prompt:
+        return sse_error("Please specify a prompt")
+
+    if not session_uuid or session_uuid not in chatbot:
+        return sse_error("invalid or missing uuid. call /new_chat first")
+
     def generator(prompt):
-        for chunk in chatbot.generate(prompt, stream=True):
+        chat = chatbot.get(session_uuid, None)
+        if not chat:
+            return sse_error("invalid or missing uuid. call /new_chat first")
+        for chunk in chat.generate(prompt, stream=True):
             yield f"data: {json.dumps(chunk)}\n\n"
 
     return Response(
@@ -69,14 +92,18 @@ def stream_post():
         return jsonify({"type": "error", "content": "Unsupported Media Type"}), 415
 
     prompt = data.get('prompt')
-    file = data.get('file')
+    session_uuid = data.get('chatid', None)
+    file = data.get('file') # seems unused
 
     if not prompt:
         return jsonify({"type": "error", "content": "No prompt found"})
 
+    if not session_uuid or session_uuid not in chatbot:
+        return jsonify({"type": "error", "content": "invalid or missing uuid. call /new_chat first"})
+
     def generator(prompt):
-        for chunk in chatbot.generate(prompt, stream=True):
-            yield f"data: {json.dumps(chunk)}"
+        for chunk in chatbot[session_uuid].generate(prompt, stream=True):
+            yield f"data: {json.dumps(chunk)}\n\n"
 
     return Response(
         stream_with_context(generator(prompt)),
@@ -87,10 +114,16 @@ def stream_post():
         }
     )
 
-@app.route('/history/', methods=['POST'])
+
+@app.route('/history', methods=['POST'])
 def history():
-    uuid = request.json().get('uuid')
-    return jsonify(chatbot.history)
+    data = request.json
+    session_uuid = data.get('chatid', None)
+
+    if not session_uuid or session_uuid not in chatbot:
+        return jsonify({"type": "error", "content": "invalid or missing uuid. call /new_chat first"})
+    
+    return jsonify(chatbot[session_uuid].history)
 
 # Disable Caching
 @app.after_request
