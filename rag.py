@@ -52,6 +52,23 @@ class ChatBot:
         new_mappings = self.__rag.add_new_document(file)
         self.__update_mapping(new_mappings)
 
+    def delete_file(self, filepath: str):
+        """Delete a document, its embeddings, and associated images."""
+        import os
+        filename = os.path.basename(filepath)
+
+        # Delete from vector DB + image files on disk + rebuild indexes
+        self.__rag.delete_document(
+            filename=filename,
+            uri=Config.PG_CONNECTION_URI,
+            text_table=Config.embed_table,
+            image_table='data_images',
+        )
+
+        # Delete the document file itself
+        if os.path.isfile(filepath):
+            os.remove(filepath)
+
     def get_history(self):
         return self.__rag.message_history_with_images
 

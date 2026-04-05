@@ -143,14 +143,19 @@ def upload_document():
 
 @app.route('/documents/<doc_id>', methods=['DELETE'])
 def delete_document(doc_id: str):
-    """Delete a document from data/ by its hash-based ID."""
+    """Delete a document, its embeddings, and associated images."""
     filepath = _find_doc_by_id(doc_id)
     if filepath is None:
         return jsonify({"error": "Document not found."}), 404
 
     filename = os.path.basename(filepath)
-    os.remove(filepath)
-    logger.info("KnowledgeHub: deleted %s", filename)
+
+    try:
+        chats['root'].delete_file(filepath)
+        logger.info("KnowledgeHub: fully deleted %s", filename)
+    except Exception as e:
+        logger.error("KnowledgeHub: delete failed for %s: %s", filename, e)
+        return jsonify({"error": f"Delete failed: {str(e)}"}), 500
 
     return jsonify({"success": True, "id": doc_id})
 
