@@ -11,12 +11,20 @@ from config import Config
 setup_logging(level=logging.DEBUG)
 
 class ChatBot:
+    lm = None
+    __index = None
+    __image_index = None
     def __init__(self):
         with open("labels/new.json", "r") as f:
             self.mappings = json.loads(f.read())
-        self.lm = configure_llm(model=Config.ollama_model, base_url=Config.ollama_url, cache=False)
-        self.__index, self.__image_index = self.__get_index()
-        self.__rag = MultiHopRAG(self.__index, self.__image_index, num_passages=10)
+
+        if ChatBot.lm is None:
+            ChatBot.lm = configure_llm(model=Config.ollama_model, cache=False, base_url=Config.ollama_url)
+
+        if ChatBot.__index is None:
+            ChatBot.__index, ChatBot.__image_index = self.__get_index()
+
+        self.__rag = MultiHopRAG(ChatBot.__index, ChatBot.__image_index, num_passages=10)
 
     def generate(self, prompt):
         resps = self.__rag.forward(question=prompt, stream=True)
@@ -24,32 +32,10 @@ class ChatBot:
         final_resp = {}
         accumulated = ""
         for resp in resps:
-            if resp["type"] == "answer_with_images":
-                actual_resp = resp
-
-                # print(f"\n\033[0;31m [DEBUG] Answer with images: \033[0m \n{actual_resp['content']}\n\n")
-                with open('example.html', 'w') as f:
-                    f.write("""
-                    <html>
-                    <head>
-                    <style>
-                    img { display: block; width: 200px; }
-                    </style>
-                    </head>
-                    <body>
-                    """ + actual_resp['content'] + """
-                    </body>
-                    </html>
-                    """)
-                yield resp
-
-            elif resp["type"] == "answer":
-                final_resp = resp
-                yield resp
-
-            elif resp["type"] == "streaming_answer":
+            if resp["type"] == "streaming_answer":
                 accumulated += resp["content"]
-                yield accumulated
+                resp["content"] = accumulated
+                yield resp
 
             elif resp["type"] == "files":
                 print(f"\n\033[0;31m[+] Using files:\033[0m {resp['content']}\n")
@@ -59,29 +45,46 @@ class ChatBot:
                 print(f"\n\033[0;31m[+] Searching for:\033[0m {resp['content']}\n")
                 yield resp
 
+            else:
+                yield resp
 
     def add_file(self, file: str):
-        self.__rag.add_new_document(file)
+        new_mappings = self.__rag.add_new_document(file)
+        self.__update_mapping(new_mappings)
+
+    def get_history(self):
+        return self.__rag.message_history_with_images
+
+    def __update_mapping(self, mapping):
+        if not mapping:
+            return
+
+        og_mappings: dict = {}
+        with open('./labels/new.json', 'r') as f:
+            og_mappings: dict = json.loads(f.read())
+
+        og_mappings.update(mapping)
+
+        with open('./labels/new.json', 'w') as f:
+            f.write(json.dumps(og_mappings))
+
 
     def __get_index(self):
         text_docs, image_docs, mapping = ChatBot.__load_docs()
 
-        with open('./labels/new.json', 'w') as f:
-            f.write(json.dumps(mapping))
+        self.__update_mapping(mapping)
 
         return [get_vector_store_index(
                     documents=text_docs,
                     uri=Config.PG_CONNECTION_URI,
                     embeddings_table=Config.embed_table,
                     embed_model=Config.embed_model,
-                    reindex=True
                 ),
                 get_vector_store_index(
                     documents=image_docs,
                     uri=Config.PG_CONNECTION_URI,
                     embeddings_table='data_images',
                     embed_model=Config.embed_model,
-                    reindex=True
                 )]
 
     @staticmethod
@@ -90,6 +93,6 @@ class ChatBot:
             doc_dir=Config.document_dir,
             uri=Config.PG_CONNECTION_URI,
             embedding_table=Config.embed_table,
-            reindex=True
+            use_vlm=True,
         )
 
